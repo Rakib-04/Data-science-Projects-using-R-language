@@ -1,0 +1,224 @@
+---
+title: "Geoanalytics final project"
+author: "Rakib"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## R packages
+```{r message=FALSE}
+#Required library
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(ipumsr)
+library(tmap)
+library(leaflet)
+
+```
+
+# open the data and filter no value in income variable
+```{r}
+dta <- read_csv("Data/usa_00005.csv")
+# 
+# colnames(dta)
+data_filter <- dta %>% 
+  filter(YEAR==2021 & STATEFIP == 13)
+filtered <- data_filter %>% 
+  filter(HHINCOME !=9999999)
+```
+# Filter Georgia, then filter Athens-Clarke county
+```{r}
+# Concatenate without a separator
+county <- filtered %>%
+  mutate(concat = paste0(STATEFIP, COUNTYFIP)) %>% 
+  filter(COUNTYFIP==059)
+```
+# Summarise vehicle information by number of vehicle each person have
+```{r}
+Vehicle_info <- county %>% 
+  filter(VEHICLES != 0)
+Sum_vehicle <- Vehicle_info%>% 
+  group_by(VEHICLES) %>% 
+  summarise(count=n())
+```
+# visualise the vehicle information using ggplot
+```{r}
+ggplot(Sum_vehicle, aes(x = factor(VEHICLES), y = count, fill = factor(VEHICLES))) +
+  geom_bar(stat = "identity") +
+  labs(x = "Number of Vehicles", y = "Count", title = "Count of Vehicles ownership", fill = "Number of vehicles")+
+  scale_fill_discrete(labels = c("One vehicle available", "2", "3","4","5","6","No vehicle available")) +
+  theme_minimal()+
+  theme(
+    panel.border = element_rect(color = "black", fill = NA)  # Add outer border
+  )
+```
+# Now do the above steps for for Health insurance (HCOVANY), Family income variable(Ftotinc)
+```{r}
+Hcoverage <- Vehicle_info %>% 
+  group_by(HCOVANY) %>% 
+  summarise(count = n()) %>% 
+  mutate(percentage = (count / sum(count)) * 100)
+
+ggplot(Hcoverage, aes(x = factor(HCOVANY), y = percentage, fill = factor(HCOVANY))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Percentage of peopls who have Health insuarance vs Who havenot", x = "Category", y = "Percentage", fill = "Health insurance Status") +
+  scale_fill_discrete(labels = c("No health insurance","With health insurance")) +
+  theme_minimal()+
+  theme(
+    panel.border = element_rect(color = "black", fill = NA)  # Add outer border
+  )
+
+##
+filter_income <- Vehicle_info%>% 
+  select(-"HIUFPGBASE")
+
+filter_familyIncome <- filter_income %>% 
+  filter(!FTOTINC %in% c(0, 9999999))
+
+summary(filter_familyIncome$FTOTINC)
+
+
+
+filter_familyIncome <- filter_familyIncome %>%
+  mutate(income_group = case_when(
+    FTOTINC < 30000 ~ "Low Income",
+    FTOTINC >= 30000 & FTOTINC <= 113000 ~ "Middle Income",
+    FTOTINC > 113000 ~ "High Income"
+  ))
+summ_incomeGroup <- filter_familyIncome %>% 
+  group_by(income_group) %>% 
+  summarise(count=n())
+  
+shapiro.test(filter_familyIncome$FTOTINC)  
+
+ggplot(filter_familyIncome, aes(x = FTOTINC, fill = income_group)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density of Family Income by Income Group",
+    x = "Family Income",
+    y = "Density",
+    fill ="Income Group"
+  ) +
+  scale_fill_manual(values = c("Low Income" = "skyblue", "Middle Income" = "orange", "High Income" = "green")) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+# Now, run the logistic regression
+
+```{r}
+## Start with the preliminary steps for logistic regression
+
+library(dplyr)
+
+# Check if insurance_status is a factor
+is.factor(filter_income$HCOVANY)
+
+# Recoding with Health insurance
+
+Final_data <- filter_income %>%
+  mutate(HCOVANY = recode(HCOVANY, `1` = 0, `2` = 1))
+
+#Work with vehicle ownership and convert it to factor
+is.factor(Final_data$VEHICLES)
+
+factorize <- Final_data %>% 
+  mutate(VEHICLES = factor(VEHICLES, levels = 1:9))
+
+is.factor(factorize$VEHICLES)
+
+# Convert it to dummy
+dummy <- factorize %>% 
+  model.matrix(~ VEHICLES - 1, .)
+
+# add dummy to the final data
+# Combine the dummies with your original data (excluding the original vehicle_ownership column)
+FinalData_dummies <- cbind(factorize, dummy)
+
+# Chi-Square Test of Independence
+
+# Creating a contingency table
+Veh_recode <- filter_familyIncome%>%
+  mutate(Categorize_veh= recode(VEHICLES, `1` = "1 available", `2` = "2 available", `3` = "3 available",`4` = "4 available",`5` = "5 available",`6` = "6 available", `7` = "7+ available", `8` = "8+ available", `9` = "Not_available"))
+
+chi_table<-filter_familyIncome %>%
+  count(income_group,VEHICLES,name = "count")
+chi_table_wide <- chi_table %>% 
+  pivot_wider(names_from=VEHICLES,values_from=count,values_fill=0)
+# Convert the whole table to numeric
+
+
+# Performing the Chi-Square Test
+chisq.test(chi_table_wide %>% select(-income_group))
+
+# Performing logistic regression
+# Combine the dummies with your original data (excluding the original vehicle_ownership column)
+
+logistic <- FinalData_dummies %>% 
+  select(-VEHICLES)
+colnames(logistic)
+model <- glm( HCOVANY ~ FTOTINC + VEHICLES1 + VEHICLES2 + VEHICLES3 + VEHICLES4 +VEHICLES9, 
+               data = logistic, 
+               family = binomial)
+summary(model)
+
+# Exponentiate coefficients to get odds ratios
+odds_ratios <- exp(coef(model))
+# Check for multicollinearity
+# install.packages("car")  
+library(car)            
+
+vif(model)
+
+# Combine the variables who have 1 vehicle, 2 vehicle, or 3 vehicle
+
+library(dplyr)
+
+new_data <- FinalData_dummies %>%
+  mutate(vehicle_ownership_combined = case_when(
+    VEHICLES %in% c(1, 2, 3) ~ "1-3 vehicles",
+  ))
+new_data$vehicle_ownership_combined <- as.factor(new_data$vehicle_ownership_combined)
+new_data$VEHICLES4 <- as.factor(new_data$VEHICLES4)
+new_data$VEHICLES5 <- as.factor(new_data$VEHICLES5)
+new_data$VEHICLES6 <- as.factor(new_data$VEHICLES6)
+new_data$VEHICLES9 <- as.factor(new_data$VEHICLES9)
+
+model <- glm( HCOVANY ~ FTOTINC + VEHICLES9, 
+              data = new_data, 
+              family = binomial(link='logit'))
+summary(model)
+vif(model)
+
+
+# install.packages("aod")
+library(aod)
+
+#Check in another way
+typeof(FinalData_dummies$VEHICLES)
+convert <- FinalData_dummies %>% 
+  mutate(convert_vehicles=as.factor(VEHICLES))
+colnames(convert)
+model <- glm( HCOVANY ~ convert_vehicles +FTOTINC, 
+              data = convert, 
+              family = binomial(link='logit'))
+summary(model)
+vif(model)
+
+# Now calculate confidence interval and log-odd ratio
+
+exp(cbind(OR = coef(model), confint(model)))
+
+```
+
+
+
+
